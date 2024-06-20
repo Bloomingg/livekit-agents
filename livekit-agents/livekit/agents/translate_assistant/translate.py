@@ -24,7 +24,6 @@ logger = logging.getLogger("livekit.agents.voice_assistant")
 @dataclass
 class _SpeechData:
     source: str | allm.LLMStream | AsyncIterable[str]
-    add_to_ctx: bool  # should this synthesis be added to the chat context
     validation_future: asyncio.Future[None]  # validate the speech for playout
     validated: bool = False
     original_text: str | None = None
@@ -380,7 +379,10 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             )
             self._audio_source_map[ln]['sid'] = pub.sid
             print(f"linking participant {identity} sid {self._audio_source_map[ln]['sid']}")
+            # async for output in self._tts.synthesize("Hey, how can I help you today?"):
+            #     await self._audio_source_map[ln]['source'].capture_frame(output.data)
             await self.say("Hey, how can I help you today?")
+
         self._log_debug(f"linking participant {identity}")
 
         for pub in p.tracks.values():
@@ -530,7 +532,6 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         # (this function can't be async because we don't want to block _update_co)
         self._answer_speech = _SpeechData(
             source="",
-            add_to_ctx=True,
             language=language,
             validation_future=asyncio.Future(),
             original_text=self._transcribed_text,
@@ -685,7 +686,7 @@ target lanaugage:
 
                 frame = audio.data
                 audio_duration += frame.samples_per_channel / frame.sample_rate
-                print(frame.samples_per_channel / frame.sample_rate)
+                
                 playout_tx.send_nowait(frame)
                 tts_forwarder.push_audio(frame)
 
@@ -834,8 +835,8 @@ target lanaugage:
             ms20 = frame.sample_rate // 50
             i = 0
             while i < len(frame.data):
-                if _should_break():
-                    break
+                # if _should_break():
+                #     break
 
                 rem = min(ms20, len(frame.data) - i)
                 data = frame.data[i : i + rem]

@@ -11,6 +11,10 @@ from livekit.agents.translate_assistant import TranslateAssistant
 from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import deepgram, openai, silero
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 async def entrypoint(ctx: JobContext):
     initial_ctx = ChatContext(
