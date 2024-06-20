@@ -223,8 +223,6 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
     async def say(
         self,
         source: str | allm.LLMStream | AsyncIterable[str],
-        *,
-        add_to_chat_context: bool = True,
     ) -> None:
         """
         Make the assistant say something.
@@ -232,16 +230,16 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
 
         Args:
             source: the source of the speech
-            add_to_chat_context: whether to add the speech to the chat context
         """
-        await self._wait_ready()
+        # await self._wait_ready()
 
         data = _SpeechData(
             source=source,
-            add_to_ctx=add_to_chat_context,
             validation_future=asyncio.Future(),
         )
         data.validate_speech()
+
+        print(f"chat with agent text: {source}")
 
         await self._start_speech(data, interrupt_current_if_possible=False)
 
@@ -315,14 +313,14 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
     
         if self._start_args.participant is not None:
             if isinstance(self._start_args.participant, rtc.RemoteParticipant):
-                self._link_participant(self._start_args.participant.identity)
+                await self._link_participant(self._start_args.participant.identity)
             else:
-                self._link_participant(self._start_args.participant)
+                await self._link_participant(self._start_args.participant)
         else:
             # no participant provided, try to find the first in the room
             print(self._start_args.room.participants.values())
             for participant in self._start_args.room.participants.values():
-                self._link_participant(participant.identity)
+                await self._link_participant(participant.identity)
                 break
 
         self._ready_future.set_result(None)
@@ -358,7 +356,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 self._plotter.plot_value("raw_t_vol", self._target_volume)
                 self._plotter.plot_value("vol", self._vol_filter.filtered())
 
-    def _link_participant(self, identity: str) -> None:
+    async def _link_participant(self, identity: str) -> None:
         p = self._start_args.room.participants_by_identity.get(identity)
         assert p is not None, "_link_participant should be called with a valid identity"
 
@@ -377,9 +375,12 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 f"translate_voice_{ln}", self._audio_source_map[ln]['source']
             )
             options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-            self._audio_source_map[ln]['sid'] = self._start_args.room.local_participant.publish_track(
+            pub = await self._start_args.room.local_participant.publish_track(
                 track, options
             )
+            self._audio_source_map[ln]['sid'] = pub.sid
+            print(f"linking participant {identity} sid {self._audio_source_map[ln]['sid']}")
+            await self.say("Hey, how can I help you today?")
         self._log_debug(f"linking participant {identity}")
 
         for pub in p.tracks.values():
@@ -388,9 +389,9 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             else:
                 self._on_track_published(pub, p)
 
-    def _on_participant_connected(self, participant: rtc.RemoteParticipant):
+    async def _on_participant_connected(self, participant: rtc.RemoteParticipant):
         if participant.identity not in self._user_map:
-            self._link_participant(participant.identity)
+            await self._link_participant(participant.identity)
 
     def _on_track_published(
         self, pub: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant
@@ -410,11 +411,13 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         participant: rtc.RemoteParticipant,
     ):
         if (
-            pub.source != rtc.TrackSource.SOURCE_MICROPHONE
+            identity in self._user_map
+            or pub.source != rtc.TrackSource.SOURCE_MICROPHONE
         ):
             return
 
         self._log_debug("starting listening to user microphone")
+        print(f"starting listening to user microphone {participant.identity}")
         self._user_map[participant.identity]['track'] = track
         self._recognize_atask = asyncio.create_task(
             self._recognize_task(rtc.AudioStream(track),participant.identity)
@@ -580,7 +583,7 @@ target lanaugage:
     async def _start_speech(
         self, data: _SpeechData, *, interrupt_current_if_possible: bool
     ) -> None:
-        await self._wait_ready()
+        # await self._wait_ready()
 
         async with self._start_speech_lock:
             # interrupt the current speech if possible, otherwise wait before playing the new speech
@@ -608,6 +611,7 @@ target lanaugage:
         Start synthesis and playout the speech only if validated
         """
         self._log_debug(f"play_speech_if_validated {data.original_text}")
+        print(f"play_speech_if_validated {data.original_text} sid {self._audio_source_map[data.language]['sid']}")
 
         # reset volume before starting a new speech
         self._vol_filter.reset()
@@ -630,7 +634,7 @@ target lanaugage:
 
         tts_co = self._synthesize_task(data, playout_tx, tts_forwarder)
         _synthesize_task = asyncio.create_task(tts_co)
-
+        print('_synthesize_task')
         try:
             # wait for speech validation before playout
             await data.validation_future
@@ -639,23 +643,10 @@ target lanaugage:
             self._validated_speech = data
             self._playout_start_time = time.time()
 
-            # if data.original_text is not None:
-            #     msg = allm.ChatMessage(text=data.original_text, role=allm.ChatRole.USER)
-            #     self._chat_ctx.messages.append(msg)
-            #     self.emit("user_speech_committed", self._chat_ctx, msg)
-
             self._log_debug("starting playout")
+            print("starting playout")
             await self._playout_co(playout_rx, tts_forwarder, data)
-
-            # msg = allm.ChatMessage(
-            #     text=data.translated_text,
-            #     role=allm.ChatRole.ASSISTANT,
-            # )
-
-            # if data.add_to_ctx:
-            #     self._chat_ctx.messages.append(msg)
-            #     self.emit("agent_speech_committed", self._chat_ctx, msg)
-
+            
             self._log_debug("playout finished")
         finally:
             self._validated_speech = None
@@ -683,17 +674,18 @@ target lanaugage:
         start_time = time.time()
         first_frame = True
         audio_duration = 0.0
-
+        print("synthesize speech from a string")
         try:
             async for audio in self._tts.synthesize(text):
                 if first_frame:
                     first_frame = False
                     dt = time.time() - start_time
                     self._log_debug(f"tts first frame in {dt:.2f}s")
+                    print(f"tts first frame in {dt:.2f}s")
 
                 frame = audio.data
                 audio_duration += frame.samples_per_channel / frame.sample_rate
-
+                print(frame.samples_per_channel / frame.sample_rate)
                 playout_tx.send_nowait(frame)
                 tts_forwarder.push_audio(frame)
 
@@ -701,6 +693,7 @@ target lanaugage:
             tts_forwarder.mark_audio_segment_end()
             playout_tx.close()
             self._log_debug(f"tts finished synthesising {audio_duration:.2f}s of audio")
+            print(f"tts finished synthesising {audio_duration:.2f}s of audio text: {text}")
 
     async def _synthesize_streamed_speech_co(
         self,
@@ -721,6 +714,7 @@ target lanaugage:
                         first_frame = False
                         dt = time.time() - start_time
                         self._log_debug(f"tts first frame in {dt:.2f}s (streamed)")
+                        print(f"tts first frame in {dt:.2f}s (streamed)")
 
                     assert event.audio is not None
                     frame = event.audio.data
@@ -729,6 +723,9 @@ target lanaugage:
                     playout_tx.send_nowait(frame)
 
             self._log_debug(
+                f"tts finished synthesising {audio_duration:.2f}s audio (streamed)"
+            )
+            print(
                 f"tts finished synthesising {audio_duration:.2f}s audio (streamed)"
             )
 
@@ -743,12 +740,13 @@ target lanaugage:
                 tts_stream.push_text(seg)
 
         finally:
+            print(f"llm return text {data.translated_text}")
             tts_forwarder.mark_text_segment_end()
             tts_stream.mark_segment_end()
 
             await tts_stream.aclose()
             await read_task
-
+            
             tts_forwarder.mark_audio_segment_end()
             playout_tx.close()
 
@@ -821,6 +819,7 @@ target lanaugage:
         async for frame in playout_rx:
             if first_frame:
                 self._log_debug("agent started speaking")
+                print("agent started speaking")
                 self._plotter.plot_event("agent_started_speaking")
                 self._agent_speaking = True
                 self.emit("agent_started_speaking")
@@ -846,7 +845,7 @@ target lanaugage:
                 for si in range(0, len(data)):
                     vol = self._vol_filter.apply(dt, self._target_volume)
                     data[si] = int((data[si] / 32768) * vol * 32768)
-
+                print(f"capture_frame {self._audio_source_map[data.language]['sid']}")
                 await self._audio_source_map[data.language]['source'].capture_frame(
                     rtc.AudioFrame(
                         data=data.tobytes(),
@@ -858,6 +857,7 @@ target lanaugage:
 
         if not first_frame:
             self._log_debug("agent stopped speaking")
+            print(f"agent stopped speaking {early_break}")
             if not early_break:
                 tts_forwarder.segment_playout_finished()
 

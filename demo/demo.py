@@ -8,6 +8,7 @@ from livekit.agents.llm import (
     ChatRole,
 )
 from livekit.agents.translate_assistant import TranslateAssistant
+from livekit.agents.voice_assistant import VoiceAssistant
 from livekit.plugins import deepgram, openai, silero
 
 
@@ -62,8 +63,17 @@ Bonjour, comment allez-vous aujourd'hui?
     )
     assistant.start(ctx.room)
 
-    await asyncio.sleep(1)
-    # await assistant.say("Hey, how can I help you today?", allow_interruptions=True)
+    # vassistant = VoiceAssistant(
+    #     vad=silero.VAD(),
+    #     stt=deepgram.STT(),
+    #     llm=openai.LLM(),
+    #     tts=openai.TTS(voice="alloy"),
+    #     chat_ctx=initial_ctx,
+    # )
+    # vassistant.start(ctx.room)
+
+    # await asyncio.sleep(1)
+    # await vassistant.say("Hey, how can I help you today?", allow_interruptions=True)
 
 
 async def request_fnc(req: JobRequest) -> None:
