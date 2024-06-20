@@ -215,7 +215,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         room.on("track_published", self._on_track_published)
         room.on("track_subscribed", self._on_track_subscribed)
         room.on("track_unsubscribed", self._on_track_unsubscribed)
-        room.on("participant_connected", self._on_participant_connected)
+        room.on("participant_connected", self._on_participant_connected_sync)
 
         self._main_atask = asyncio.create_task(self._main_task())
 
@@ -279,7 +279,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         self._start_args.room.off("track_subscribed", self._on_track_subscribed)
         self._start_args.room.off("track_unsubscribed", self._on_track_unsubscribed)
         self._start_args.room.off(
-            "participant_connected", self._on_participant_connected
+            "participant_connected", self._on_participant_connected_sync
         )
 
         self._plotter.terminate()
@@ -387,6 +387,10 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 self._on_track_subscribed(pub.track, pub, p)  # type: ignore
             else:
                 self._on_track_published(pub, p)
+
+    def _on_participant_connected_sync(self, participant: rtc.RemoteParticipant):
+        asyncio.create_task(self._on_participant_connected(participant))
+
 
     async def _on_participant_connected(self, participant: rtc.RemoteParticipant):
         if participant.identity not in self._user_map:
