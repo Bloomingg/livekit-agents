@@ -379,9 +379,6 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             )
             self._audio_source_map[ln]['sid'] = pub.sid
             print(f"linking participant {identity} sid {self._audio_source_map[ln]['sid']}")
-            # async for output in self._tts.synthesize("Hey, how can I help you today?"):
-            #     await self._audio_source_map[ln]['source'].capture_frame(output.data)
-            await self.say("Hey, how can I help you today?")
 
         self._log_debug(f"linking participant {identity}")
 
@@ -413,8 +410,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         participant: rtc.RemoteParticipant,
     ):
         if (
-            identity in self._user_map
-            or pub.source != rtc.TrackSource.SOURCE_MICROPHONE
+            pub.source != rtc.TrackSource.SOURCE_MICROPHONE
         ):
             return
 
@@ -797,25 +793,17 @@ target lanaugage:
         self,
         playout_rx: aio.ChanReceiver[rtc.AudioFrame],
         tts_forwarder: transcription.TTSSegmentsForwarder | utils._noop.Nop,
-        data: _SpeechData,
+        speech_data: _SpeechData,
     ) -> None:
         """
         Playout audio with the current volume.
         The playout_rx is streaming the synthesized speech from the TTS provider to minimize latency
         """
         assert (
-            data.language in self._audio_source_map
+            speech_data.language in self._audio_source_map
         ), "audio source should be set before playout"
 
-        def _should_break():
-            eps = 1e-6
-            assert self._validated_speech is not None
-            return (
-                self._vol_filter.filtered() <= eps
-            )
-
         first_frame = True
-        early_break = False
 
         async for frame in playout_rx:
             if first_frame:
@@ -827,40 +815,15 @@ target lanaugage:
                 tts_forwarder.segment_playout_started()  # we have only one segment
                 first_frame = False
 
-            if _should_break():
-                early_break = True
-                break
-
-            # divide the frame by chunks of 20ms
-            ms20 = frame.sample_rate // 50
-            i = 0
-            while i < len(frame.data):
-                # if _should_break():
-                #     break
-
-                rem = min(ms20, len(frame.data) - i)
-                data = frame.data[i : i + rem]
-                i += rem
-
-                dt = 1 / len(data)
-                for si in range(0, len(data)):
-                    vol = self._vol_filter.apply(dt, self._target_volume)
-                    data[si] = int((data[si] / 32768) * vol * 32768)
-                print(f"capture_frame {self._audio_source_map[data.language]['sid']}")
-                await self._audio_source_map[data.language]['source'].capture_frame(
-                    rtc.AudioFrame(
-                        data=data.tobytes(),
-                        sample_rate=frame.sample_rate,
-                        num_channels=frame.num_channels,
-                        samples_per_channel=rem,
-                    )
-                )
+            await self._audio_source_map[speech_data.language]['source'].capture_frame(
+               frame
+            )
+               
 
         if not first_frame:
             self._log_debug("agent stopped speaking")
-            print(f"agent stopped speaking {early_break}")
-            if not early_break:
-                tts_forwarder.segment_playout_finished()
+            print(f"agent stopped speaking")
+            tts_forwarder.segment_playout_finished()
 
             self._plotter.plot_event("agent_stopped_speaking")
             self._agent_speaking = False
