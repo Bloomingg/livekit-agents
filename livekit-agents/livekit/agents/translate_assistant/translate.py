@@ -473,24 +473,24 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 stt_stream.push_frame(ev.frame)
                 vad_stream.push_frame(ev.frame)
 
-        # async def _vad_stream_co() -> None:
-        #     async for ev in vad_stream:
-        #         if ev.type == avad.VADEventType.START_OF_SPEECH:
-        #             self._log_debug("user started speaking")
-        #             self._plotter.plot_event("user_started_speaking")
-        #             self._user_speaking = True
-        #             self.emit("user_started_speaking")
-        #         elif ev.type == avad.VADEventType.INFERENCE_DONE:
-        #             self._plotter.plot_value("vad_raw", ev.raw_inference_prob)
-        #             self._plotter.plot_value("vad_smoothed", ev.probability)
-        #             self._plotter.plot_value("vad_dur", ev.inference_duration * 1000)
-        #             self._speech_prob = ev.raw_inference_prob
-        #         elif ev.type == avad.VADEventType.END_OF_SPEECH:
-        #             self._log_debug(f"user stopped speaking {ev.duration:.2f}s")
-        #             self._plotter.plot_event("user_started_speaking")
-        #             self._pending_validation = True
-        #             self._user_speaking = False
-        #             self.emit("user_stopped_speaking")
+        async def _vad_stream_co() -> None:
+            async for ev in vad_stream:
+                if ev.type == avad.VADEventType.START_OF_SPEECH:
+                    self._log_debug("user started speaking")
+                    self._plotter.plot_event("user_started_speaking")
+                    self._user_speaking = True
+                    self.emit("user_started_speaking")
+                elif ev.type == avad.VADEventType.INFERENCE_DONE:
+                    self._plotter.plot_value("vad_raw", ev.raw_inference_prob)
+                    self._plotter.plot_value("vad_smoothed", ev.probability)
+                    self._plotter.plot_value("vad_dur", ev.inference_duration * 1000)
+                    self._speech_prob = ev.raw_inference_prob
+                elif ev.type == avad.VADEventType.END_OF_SPEECH:
+                    self._log_debug(f"user stopped speaking {ev.duration:.2f}s")
+                    self._plotter.plot_event("user_started_speaking")
+                    self._pending_validation = True
+                    self._user_speaking = False
+                    self.emit("user_stopped_speaking")
 
         async def _stt_stream_co() -> None:
             async for ev in stt_stream:
@@ -513,7 +513,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         try:
             await asyncio.gather(
                 _audio_stream_co(),
-                # _vad_stream_co(),
+                _vad_stream_co(),
                 _stt_stream_co(),
             )
         finally:
