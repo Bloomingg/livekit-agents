@@ -4,6 +4,7 @@ import asyncio
 from collections import defaultdict
 import contextlib
 import contextvars
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -66,6 +67,10 @@ class User:
 class AudioSource:
     source: dict
     sid: str
+
+@dataclass
+class UserMetaData:
+    ln: str
 
 
 _ContextVar = contextvars.ContextVar("voice_assistant_contextvar")
@@ -167,7 +172,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         self._pending_validation = False
 
         # tasks
-        self._recognize_atask: asyncio.Task | None = None
+        self._recognize_atasks: list[asyncio.Task] = []
         self._play_atask: asyncio.Task | None = None
         self._tasks = set[asyncio.Task]()
 
@@ -288,8 +293,9 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             self._main_atask.cancel()
             await self._main_atask
 
-        if self._recognize_atask is not None:
-            self._recognize_atask.cancel()
+        if self._recognize_atasks is not None:
+            for task in self._recognize_atasks:
+                task.cancel()
 
         if not wait:
             if self._play_atask is not None:
@@ -299,8 +305,9 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             if self._play_atask is not None:
                 await self._play_atask
 
-            if self._recognize_atask is not None:
-                await self._recognize_atask
+            if self._recognize_atasks is not None:
+                for task in self._recognize_atasks:
+                    task.cancel()
 
     @utils.log_exceptions(logger=logger)
     async def _main_task(self) -> None:
@@ -355,17 +362,35 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 self._plotter.plot_value("raw_t_vol", self._target_volume)
                 self._plotter.plot_value("vol", self._vol_filter.filtered())
 
+    def _parse_metadata(self, metadata: str) -> UserMetaData:
+        """
+        Parse metadata from the user input
+        """
+        try:
+            data_dict = json.loads(metadata)
+            ln_value = data_dict.get("ln", "en")
+            return UserMetaData(ln=ln_value)
+        except Exception:
+            return UserMetaData(ln="en")
+        
+    def _prepare_user_map(self, participant: Any, track: Any = None) -> str:
+        """
+        Prepare the user map with the participant and track
+        """
+        metadata = self._parse_metadata(participant.metadata)
+        ln = metadata.ln
+        self._user_map[participant.identity] = {
+            "track": track,
+            "language": ln
+        }
+        return ln
+
     async def _link_participant(self, identity: str) -> None:
         p = self._start_args.room.participants_by_identity.get(identity)
         assert p is not None, "_link_participant should be called with a valid identity"
-
-        # ln = 'zh' if p.identity.endswith('A') else 'en'
-        ln = 'en'
-
-        self._user_map[identity] = {
-            'language': ln,
-            'track': None,
-        }
+        
+        ln = self._prepare_user_map(p)
+        print(f"_link_participant ::: {identity}")
         if (ln not in self ._audio_source_map):
             self._audio_source_map[ln]['source'] = rtc.AudioSource(
                 self._tts.sample_rate, self._tts.num_channels
@@ -414,16 +439,19 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         participant: rtc.RemoteParticipant,
     ):
         if (
-            pub.source != rtc.TrackSource.SOURCE_MICROPHONE
+            (participant.identity in self._user_map and self._user_map[participant.identity]['track'] is not None)
+            or pub.source != rtc.TrackSource.SOURCE_MICROPHONE
         ):
             return
 
         self._log_debug("starting listening to user microphone")
         print(f"starting listening to user microphone {participant.identity}")
-        self._user_map[participant.identity]['track'] = track
-        self._recognize_atask = asyncio.create_task(
+        self._prepare_user_map(participant, track)
+
+        task = asyncio.create_task(
             self._recognize_task(rtc.AudioStream(track),participant.identity)
         )
+        self._recognize_atasks.append(task)
 
     def _on_track_unsubscribed(
         self,
@@ -434,17 +462,17 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         if (
             participant.identity not in self._user_map
             or pub.source != rtc.TrackSource.SOURCE_MICROPHONE
-            or 'track' not in self._user_map[participant.identity]
         ):
             return
 
         # user microphone unsubscribed, (participant disconnected/track unpublished)
         self._log_debug("user microphone not available anymore")
         assert (
-            self._recognize_atask is not None
+            self._recognize_atasks is not None
         ), "recognize task should be running when user_track was set"
-        self._recognize_atask.cancel()
-        self._user_map[participant.identity]['track'] = None
+        for task in self._recognize_atasks:
+            task.cancel()
+        del self._user_map[participant.identity]
 
     @utils.log_exceptions(logger=logger)
     async def _recognize_task(self, audio_stream: rtc.AudioStream, identity: str) -> None:
@@ -458,7 +486,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         # ), "user identity should be set before recognizing"
 
         vad_stream = self._vad.stream()
-        stt_stream = self._stt.stream()
+        stt_stream = self._stt.stream(language=self._user_map[identity]['language'])
 
         stt_forwarder = utils._noop.Nop()
         if self._opts.transcription:
@@ -473,34 +501,35 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 stt_stream.push_frame(ev.frame)
                 vad_stream.push_frame(ev.frame)
 
-        # async def _vad_stream_co() -> None:
-        #     async for ev in vad_stream:
-        #         if ev.type == avad.VADEventType.START_OF_SPEECH:
-        #             self._log_debug("user started speaking")
-        #             self._plotter.plot_event("user_started_speaking")
-        #             self._user_speaking = True
-        #             self.emit("user_started_speaking")
-        #         elif ev.type == avad.VADEventType.INFERENCE_DONE:
-        #             self._plotter.plot_value("vad_raw", ev.raw_inference_prob)
-        #             self._plotter.plot_value("vad_smoothed", ev.probability)
-        #             self._plotter.plot_value("vad_dur", ev.inference_duration * 1000)
-        #             self._speech_prob = ev.raw_inference_prob
-        #         elif ev.type == avad.VADEventType.END_OF_SPEECH:
-        #             self._log_debug(f"user stopped speaking {ev.duration:.2f}s")
-        #             self._plotter.plot_event("user_started_speaking")
-        #             self._pending_validation = True
-        #             self._user_speaking = False
-        #             self.emit("user_stopped_speaking")
+        async def _vad_stream_co() -> None:
+            async for ev in vad_stream:
+                if ev.type == avad.VADEventType.START_OF_SPEECH:
+                    self._log_debug("user started speaking")
+                    self._plotter.plot_event("user_started_speaking")
+                    self._user_speaking = True
+                    self.emit("user_started_speaking")
+                elif ev.type == avad.VADEventType.INFERENCE_DONE:
+                    self._plotter.plot_value("vad_raw", ev.raw_inference_prob)
+                    self._plotter.plot_value("vad_smoothed", ev.probability)
+                    self._plotter.plot_value("vad_dur", ev.inference_duration * 1000)
+                    self._speech_prob = ev.raw_inference_prob
+                elif ev.type == avad.VADEventType.END_OF_SPEECH:
+                    self._log_debug(f"user stopped speaking {ev.duration:.2f}s")
+                    self._plotter.plot_event("user_started_speaking")
+                    self._pending_validation = True
+                    self._user_speaking = False
+                    self.emit("user_stopped_speaking")
 
         async def _stt_stream_co() -> None:
             async for ev in stt_stream:
                 stt_forwarder.update(ev)
                 if ev.type == astt.SpeechEventType.FINAL_TRANSCRIPT:
                     targetln = 'en'
-                    # for _, value in self._user_map.items():
-                    #     if value['language'] != self._user_map[identity]['language']:
-                    #         targetln = value['language']
-                    #         break
+                    for _, value in self._user_map.items():
+                        if value['language'] != self._user_map[identity]['language']:
+                            targetln = value['language']
+                            break
+                    print(f"stt_stream_co {ev.alternatives[0].text} targetln {targetln}")
                     self._on_final_transcript(ev.alternatives[0].text, targetln)
                 elif ev.type == astt.SpeechEventType.INTERIM_TRANSCRIPT:
                     # interim transcript is used in combination with VAD
@@ -513,7 +542,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         try:
             await asyncio.gather(
                 _audio_stream_co(),
-                # _vad_stream_co(),
+                _vad_stream_co(),
                 _stt_stream_co(),
             )
         finally:
