@@ -172,7 +172,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         self._pending_validation = False
 
         # tasks
-        self._recognize_atasks: list[asyncio.Task] = []
+        self._recognize_atask_map: dict[str, asyncio.Task] = dict()
         self._play_atask: asyncio.Task | None = None
         self._tasks = set[asyncio.Task]()
 
@@ -204,15 +204,15 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
     def start(
         self, room: rtc.Room, participant: rtc.RemoteParticipant | str | None = None
     ) -> None:
-        """Start the voice assistant
+        """Start the translate assistant
 
         Args:
             room: the room to use
             participant: the participant to listen to, can either be a participant or a participant identity
-                If None, the first participant found in the room will be selected
+                If None, the first participant found ivn the room will be selected
         """
         if self.started:
-            raise RuntimeError("voice assistant already started")
+            raise RuntimeError("translate assistant already started")
 
         self._started = True
         self._start_args = _StartArgs(room=room, participant=participant)
@@ -221,6 +221,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         room.on("track_subscribed", self._on_track_subscribed)
         room.on("track_unsubscribed", self._on_track_unsubscribed)
         room.on("participant_connected", self._on_participant_connected_sync)
+        room.on("participant_metadata_changed", self._on_participant_metadata_changed_sync)
 
         self._main_atask = asyncio.create_task(self._main_task())
 
@@ -270,7 +271,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
 
     async def aclose(self, wait: bool = True) -> None:
         """
-        Close the voice assistant
+        Close the translate assistant
 
         Args:
             wait: whether to wait for the current speech to finish before closing
@@ -286,6 +287,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         self._start_args.room.off(
             "participant_connected", self._on_participant_connected_sync
         )
+        self._start_args.room.off("participant_metadata_changed", self._on_participant_metadata_changed_sync)
 
         self._plotter.terminate()
 
@@ -293,8 +295,8 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             self._main_atask.cancel()
             await self._main_atask
 
-        if self._recognize_atasks is not None:
-            for task in self._recognize_atasks:
+        if self._recognize_atask_map is not None:
+            for _, task in self._recognize_atask_map.items():
                 task.cancel()
 
         if not wait:
@@ -305,8 +307,8 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
             if self._play_atask is not None:
                 await self._play_atask
 
-            if self._recognize_atasks is not None:
-                for task in self._recognize_atasks:
+            if self._recognize_atask_map is not None:
+                for _, task in self._recognize_atask_map.items():
                     task.cancel()
 
     @utils.log_exceptions(logger=logger)
@@ -368,21 +370,31 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         """
         try:
             data_dict = json.loads(metadata)
-            ln_value = data_dict.get("ln", "en")
+            ln_value = data_dict.get("ln", "disabled")
             return UserMetaData(ln=ln_value)
         except Exception:
             return UserMetaData(ln="en")
         
-    def _prepare_user_map(self, participant: Any, track: Any = None) -> str:
+    def _prepare_user_map(self, participant: Any, track: Any = None, old_ln: str = None) -> str:
         """
         Prepare the user map with the participant and track
         """
-        metadata = self._parse_metadata(participant.metadata)
-        ln = metadata.ln
-        self._user_map[participant.identity] = {
-            "track": track,
-            "language": ln
-        }
+        ln = self._parse_metadata(participant.metadata).ln
+
+        if ln != "disabled":
+            self._user_map[participant.identity] = {
+                "track": track,
+                "language": ln
+            }
+        elif participant.identity in self._user_map:
+                task = self._recognize_atask_map.get(participant.identity)
+                if task is not None:
+                    task.cancel()
+                    del self._recognize_atask_map[participant.identity]
+                del self._user_map[participant.identity]
+        if old_ln is not None and ln != old_ln and old_ln in self._audio_source_map:
+            self._start_args.room.local_participant.unpublish_track(self._audio_source_map[old_ln]['sid'])
+            del self._audio_source_map[old_ln]
         return ln
 
     async def _link_participant(self, identity: str) -> None:
@@ -390,6 +402,9 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         assert p is not None, "_link_participant should be called with a valid identity"
         
         ln = self._prepare_user_map(p)
+        if ln == "disabled":
+            return
+        
         print(f"_link_participant ::: {identity}")
         if (ln not in self ._audio_source_map):
             self._audio_source_map[ln]['source'] = rtc.AudioSource(
@@ -416,6 +431,15 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
     def _on_participant_connected_sync(self, participant: rtc.RemoteParticipant):
         asyncio.create_task(self._on_participant_connected(participant))
 
+    def _on_participant_metadata_changed_sync(self, participant: rtc.RemoteParticipant, old_metadata: str):
+        asyncio.create_task(self._on_participant_metadata_changed(participant, old_metadata))
+
+    async def _on_participant_metadata_changed(self, participant: rtc.RemoteParticipant, old_metadata: str):
+        if participant.identity in self._user_map:
+            old_ln = self._parse_metadata(old_metadata).ln
+            ln = self._prepare_user_map(participant=participant,old_ln=old_ln)
+            if ln != "disabled" and old_ln != ln:
+                await self._link_participant(participant.identity)
 
     async def _on_participant_connected(self, participant: rtc.RemoteParticipant):
         if participant.identity not in self._user_map:
@@ -444,14 +468,18 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         ):
             return
 
+        ln = self._prepare_user_map(participant, track)
+        if ln == "disabled":
+            return
+        
         self._log_debug("starting listening to user microphone")
         print(f"starting listening to user microphone {participant.identity}")
-        self._prepare_user_map(participant, track)
 
         task = asyncio.create_task(
             self._recognize_task(rtc.AudioStream(track),participant.identity)
         )
-        self._recognize_atasks.append(task)
+
+        self._recognize_atask_map[participant.identity] = task
 
     def _on_track_unsubscribed(
         self,
@@ -468,10 +496,12 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         # user microphone unsubscribed, (participant disconnected/track unpublished)
         self._log_debug("user microphone not available anymore")
         assert (
-            self._recognize_atasks is not None
+            self._recognize_atask_map is not None
         ), "recognize task should be running when user_track was set"
-        for task in self._recognize_atasks:
+        task = self._recognize_atask_map.get(participant.identity)
+        if task is not None:
             task.cancel()
+            del self._recognize_atask_map[participant.identity]
         del self._user_map[participant.identity]
 
     @utils.log_exceptions(logger=logger)
