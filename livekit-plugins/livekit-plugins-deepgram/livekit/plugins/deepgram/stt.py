@@ -132,7 +132,7 @@ class STT(stt.STT):
         language: DeepgramLanguages | str | None = None,
     ) -> "SpeechStream":
         config = self._sanitize_options(language=language)
-        return SpeechStream(config, self._api_key, self._ensure_session())
+        return SpeechStream(config, self._api_key)
 
     def _sanitize_options(
         self,
@@ -156,7 +156,7 @@ class SpeechStream(stt.SpeechStream):
         self,
         opts: STTOptions,
         api_key: str,
-        http_session: aiohttp.ClientSession,
+        # http_session: aiohttp.ClientSession,
         sample_rate: int = 48000,
         num_channels: int = 1,
         max_retry: int = 32,
@@ -171,7 +171,7 @@ class SpeechStream(stt.SpeechStream):
         self._num_channels = num_channels
         self._api_key = api_key
         self._speaking = False
-        self._session = http_session
+        self._session = aiohttp.ClientSession()
         self._queue = asyncio.Queue[Union[rtc.AudioFrame, str]]()
         self._event_queue = asyncio.Queue[Optional[stt.SpeechEvent]]()
         self._closed = False
@@ -197,6 +197,7 @@ class SpeechStream(stt.SpeechStream):
             await self._main_task
 
         await self._session.close()
+        self._session = None
 
     async def _run(self, max_retry: int) -> None:
         """
@@ -230,7 +231,8 @@ class SpeechStream(stt.SpeechStream):
                     retry_count = 0  # connected successfully, reset the retry_count
 
                     await self._run_ws(ws)
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Error connecting to Deepgram: {str(e)}", exc_info=True)
                     # Something went wrong, retry the connection
                     if retry_count >= max_retry:
                         logger.exception(
