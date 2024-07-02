@@ -29,7 +29,7 @@ class _SpeechData:
     validated: bool = False
     original_text: str | None = None
     translated_text: str = ""
-    language: str = "en"
+    language: str = "en-US"
 
     def validate_speech(self) -> None:
         self.validated = True
@@ -370,7 +370,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         """
         try:
             data_dict = json.loads(metadata)
-            ln_value = data_dict.get("ln", "disabled")
+            ln_value = data_dict.get("language", "disabled")
             return UserMetaData(ln=ln_value)
         except Exception:
             return UserMetaData(ln="disabled")
@@ -418,7 +418,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
                 track, options
             )
             self._audio_source_map[ln]['sid'] = pub.sid
-            print(f"linking participant {identity} sid {self._audio_source_map[ln]['sid']}")
+            print(f"linking participant {identity} ln {ln} sid {self._audio_source_map[ln]['sid']}")
 
         self._log_debug(f"linking participant {identity}")
 
