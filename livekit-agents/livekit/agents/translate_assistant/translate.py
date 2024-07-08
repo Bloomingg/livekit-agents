@@ -613,7 +613,7 @@ class TranslateAssistant(utils.EventEmitter[EventTypes]):
         text = f"""
 text:
 {self._transcribed_text}
-target lanaugage:
+target language:
 {language}
 """
         print(f"chat with user text: {text}")
@@ -748,7 +748,6 @@ target lanaugage:
         start_time = time.time()
         first_frame = True
         audio_duration = 0.0
-        print("synthesize speech from a string")
         try:
             async for audio in self._tts.synthesize(text):
                 if first_frame:
@@ -779,16 +778,12 @@ target lanaugage:
         """synthesize speech from streamed text"""
 
         async def _read_generated_audio_task():
-            start_time = time.time()
             first_frame = True
             audio_duration = 0.0
             async for event in tts_stream:
                 if event.type == atts.SynthesisEventType.AUDIO:
                     if first_frame:
                         first_frame = False
-                        dt = time.time() - start_time
-                        self._log_debug(f"tts first frame in {dt:.2f}s (streamed)")
-                        print(f"tts first frame in {dt:.2f}s (streamed)")
 
                     assert event.audio is not None
                     frame = event.audio.data
@@ -796,12 +791,6 @@ target lanaugage:
                     tts_forwarder.push_audio(frame)
                     playout_tx.send_nowait(frame)
 
-            self._log_debug(
-                f"tts finished synthesising {audio_duration:.2f}s audio (streamed)"
-            )
-            print(
-                f"tts finished synthesising {audio_duration:.2f}s audio (streamed)"
-            )
 
         # otherwise, stream the text to the TTS
         tts_stream = self._tts.stream()
@@ -815,6 +804,13 @@ target lanaugage:
 
         finally:
             print(f"llm return text {data.translated_text}")
+            chat = rtc.ChatManager(self._start_args.room)
+            message = {
+                "language": data.language,
+                "text": data.translated_text
+            }
+            message_str = json.dumps(message)
+            await chat.send_message(message_str)
             tts_forwarder.mark_text_segment_end()
             tts_stream.mark_segment_end()
 
@@ -881,7 +877,6 @@ target lanaugage:
         ), "audio source should be set before playout"
 
         first_frame = True
-
         async for frame in playout_rx:
             if first_frame:
                 self._log_debug("agent started speaking")
