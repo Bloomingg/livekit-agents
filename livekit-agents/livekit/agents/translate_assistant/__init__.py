@@ -1,3 +1,3 @@
-from .translate import AssistantContext, TranslateAssistant
+from .translate import TranslateAssistant
 
-__all__ = ["TranslateAssistant", "AssistantContext"]
+__all__ = ["TranslateAssistant"]

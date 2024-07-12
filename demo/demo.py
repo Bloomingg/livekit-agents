@@ -58,9 +58,7 @@ Bonjour, comment allez-vous aujourd'hui?
 
     assistant = TranslateAssistant(
         vad=silero.VAD(),
-        stt=deepgram.STT(
-             language="zh-CN"
-        ),
+        stt=deepgram.STT(),
         llm=openai.LLM(),
         tts=openai.TTS(voice="alloy"),
         chat_ctx=initial_ctx,
