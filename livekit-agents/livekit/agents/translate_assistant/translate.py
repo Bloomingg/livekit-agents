@@ -307,4 +307,7 @@ class TranslateAssistant():
         if task is not None:
             task.cancel()
             del self._recognize_atask_map[participant.identity]
+        user_data = self._user_map[participant.identity]
+        if user_data.sid is not None:
+            asyncio.create_task(self._start_args.room.local_participant.unpublish_track(user_data.sid))
         del self._user_map[participant.identity]
